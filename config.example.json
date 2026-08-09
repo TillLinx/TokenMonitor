@@ -1,0 +1,22 @@
+{
+  "refresh_interval_seconds": 300,
+  "request_timeout_seconds": 10,
+  "providers": [
+    {
+      "name": "Popcorn",
+      "type": "generic",
+      "url": "https://api-us.popcorn.wiki/v1/usage",
+      "method": "GET",
+      "api_key": "YOUR_TOKEN",
+      "value_path": "remaining",
+      "format": "currency",
+      "currency": "USD",
+      "offset": 0,
+      "today_cost_path": "usage.today.cost",
+      "today_cost_rate": 0.125,
+      "alert_below": 1.0,
+      "informational": false,
+      "monthly_budget": 30
+    }
+  ]
+}

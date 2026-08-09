@@ -1,0 +1,16 @@
+# 敏感文件（含 API 密钥，禁止上传）
+config.json
+key.txt
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# PyInstaller 构建产物
+build/
+build_updated/
+dist/
+dist_updated/
+
+# Agent 配置（本地）
+.agents/

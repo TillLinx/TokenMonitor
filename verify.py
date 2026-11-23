@@ -22,7 +22,7 @@ img = monitor.render_tray_icon([
     ("DeepSeek", Snapshot(primary=12.34, unit="CNY", ok=True, detail="\u4f59\u989d \u00a512.34")),
     ("Broken", Snapshot(ok=False, error="api_key missing")),
 ])
-print(f"[1/12] icon rendered ({img.size[0]}x{img.size[1]})")
+print(f"[1/17] icon rendered ({img.size[0]}x{img.size[1]})")
 
 # 3. tooltip + menu build
 app = monitor.App.__new__(monitor.App)
@@ -35,17 +35,15 @@ app.snapshots = [
     ("DeepSeek", Snapshot(primary=12.34, unit="CNY", ok=True, detail="\u4f59\u989d \u00a512.34")),
     ("Broken", Snapshot(ok=False, error="api_key missing")),
 ]
-tooltip = app._build_tooltip()
 menu = app._build_menu()
-assert "Token Monitor" in tooltip
-assert "OpenAI" in tooltip and "DeepSeek" in tooltip
-assert "OpenAI: 85% | used $5" in tooltip
-print(f"[2/12] tooltip built ({len(tooltip.splitlines())} lines)")
-print(f"       menu items: {len(menu.items)}")
+menu_texts = [getattr(item, "text", "") or "" for item in menu.items]
+assert any("Show usage" in text for text in menu_texts)
+assert not any("OpenAI" in text or "DeepSeek" in text for text in menu_texts)
+print(f"[2/17] menu built ({len(menu.items)} items, no status rows)")
 
 # 3. status thresholds + safe_err redaction (no network, no tray)
 from providers import safe_err
-from monitor import _status_of, _format_icon_label, _config_dir, _menu_label
+from monitor import _status_of, _format_icon_label, _config_dir
 
 def _expect(cond, msg):
     if not cond:
@@ -91,10 +89,6 @@ _expect(_format_icon_label(Snapshot(primary=1500.0, unit="USD", ok=True)) == "1.
         "large currency should compact to k (no $ prefix in icon)")
 _expect(_format_icon_label(Snapshot(primary=1_500_000.0, unit="USD", ok=True)) == "1.5M",
         "huge currency should compact to M (no $ prefix in icon)")
-_expect(_menu_label("Popcorn", Snapshot(primary=6.74, unit="USD", ok=True, detail="$6.74")) == "Popcorn: $6.74",
-        "menu label should not duplicate the primary value as detail")
-_expect(_menu_label("Popcorn", Snapshot(primary=6.74, unit="USD", ok=True, detail="today $1.23")) == "Popcorn: $6.74  |  today $1.23",
-        "menu label should include non-duplicate detail such as today cost")
 usage_fraction = getattr(monitor, "_usage_fraction", None)
 _expect(callable(usage_fraction), "monitor._usage_fraction must exist for native tray gauge fill")
 _expect(abs(usage_fraction(Snapshot(primary=70.0, unit="percent", ok=True)) - 0.70) < 1e-6,
@@ -120,7 +114,7 @@ _expect("sk-secret" not in msg,                 f"safe_err must redact api_key, 
 _expect("url: (redacted)" in msg,               f"safe_err must redact urllib3 url: fragment, got: {msg!r}")
 _expect("api.example.com" in msg,               f"safe_err should keep host, got: {msg!r}")
 _expect(len(msg) <= 160,                         f"safe_err should cap at 160 chars, got {len(msg)}")
-print(f"[3/12] status + safe_err OK")
+print(f"[3/17] status + safe_err OK")
 
 # Multi-state icon render: ok / warn / alert / currency / empty / paused.
 def _state(label, snap_list):
@@ -138,7 +132,7 @@ _state("64_warn",  [("X", Snapshot(primary=70.0, unit="percent", ok=True))])
 _state("64_ok",    [("X", Snapshot(primary=30.0, unit="percent", ok=True))])
 _state("64_currency", [("Popcorn", Snapshot(primary=9.71, unit="USD", ok=True, detail="$9.71"))])
 _state("64_empty", [])
-print(f"[4/12] multi-state icon render OK")
+print(f"[4/17] multi-state icon render OK")
 
 # 4b. Tray icon is a 64x64 native tray glyph.
 _dim_img = monitor.render_tray_icon([("X", Snapshot(primary=30.0, unit="percent", ok=True))])
@@ -177,7 +171,7 @@ _expect(1 <= len(_alert_accent) <= 80,
 # so the call must not raise. We don't actually invoke Explorer.
 cdir = _config_dir()
 _expect(cdir.exists(), f"_config_dir() must exist, got {cdir}")
-print(f"[5/12] _config_dir() -> {cdir}")
+print(f"[5/17] _config_dir() -> {cdir}")
 
 # 6. generic provider end-to-end via local server
 class Handler(BaseHTTPRequestHandler):
@@ -210,12 +204,12 @@ server.shutdown()
 
 assert snap.ok, f"expected ok, got error={snap.error}"
 assert abs(snap.primary - 70.0) < 1e-6, f"expected 70%, got {snap.primary}"
-print(f"[6/12] generic provider OK -> primary={snap.primary:.1f}% detail='{snap.detail}'")
+print(f"[6/17] generic provider OK -> primary={snap.primary:.1f}% detail='{snap.detail}'")
 
 # 5. config example is valid JSON
 example = json.loads((HERE / "config.example.json").read_text(encoding="utf-8"))
 assert "providers" in example and isinstance(example["providers"], list)
-print(f"[7/12] config.example.json OK -> {len(example['providers'])} providers")
+print(f"[7/17] config.example.json OK -> {len(example['providers'])} providers")
 
 # 8. Popcorn-shaped config end-to-end + minimax empty body graceful.
 from providers import fetch
@@ -258,7 +252,7 @@ _expect(s_today.ok and s_today.detail == "today $1.23",
         f"today_cost_path should add today cost detail, got {s_today.detail!r}")
 _expect(s_today_rate.ok and s_today_rate.detail == "today $0.15",
         f"today_cost_rate should multiply standard today cost, got {s_today_rate.detail!r}")
-print(f"[8/12] Popcorn-shape OK -> {s_pop.detail}")
+print(f"[8/17] Popcorn-shape OK -> {s_pop.detail}")
 
 # 9. minimax_coding_plan must not produce an empty Snapshot when the
 # API returns a successful base_resp with an empty model_remains;
@@ -276,7 +270,7 @@ finally:
 _expect(not s_mm.ok, "minimax empty body should not be ok")
 _expect(s_mm.detail == "no usage data",
         f"minimax empty body detail should be informative, got {s_mm.detail!r}")
-print(f"[9/12] minimax empty body OK -> detail={s_mm.detail!r}")
+print(f"[9/17] minimax empty body OK -> detail={s_mm.detail!r}")
 
 # 10. minimax reset countdown: detail must contain a "reset in Xh Ym"
 # string instead of the old "(rem X%)" leftover, derived from the
@@ -304,7 +298,7 @@ _expect("(rem" not in s_reset.detail,
         f"detail should no longer contain '(rem X%)', got {s_reset.detail!r}")
 _expect(abs(s_reset.primary - 13.0) < 1e-6,
         f"primary should be 13.0 (100-87), got {s_reset.primary!r}")
-print(f"[10/12] minimax reset countdown OK -> {s_reset.detail!r}")
+print(f"[10/17] minimax reset countdown OK -> {s_reset.detail!r}")
 
 # 11. tooltip age format: wall-clock based, includes 'never' before first refresh.
 app_age = monitor.App.__new__(monitor.App)
@@ -326,7 +320,7 @@ for delta_s, expected in [
 app_age._last_refresh_at = None
 _expect(app_age._format_age() == "never",
         "age before first refresh should be 'never'")
-print(f"[11/12] tooltip age format OK")
+print(f"[11/17] tooltip age format OK")
 
 # 12. generic provider offset: cfg.offset must be added to the API value
 # only in the value branch (currency / percent / number), never in the
@@ -398,6 +392,187 @@ _expect(s_pct.ok and abs(s_pct.primary - 7.0) < 1e-6,
         f"used/limit with offset: offset must be ignored, got {s_pct.primary!r}")
 _expect("(raw" not in s_pct.detail,
         f"used/limit detail must not contain (raw ...) suffix, got {s_pct.detail!r}")
-print(f"[12/12] generic offset OK -> {s_off.detail}")
+print(f"[12/17] generic offset OK -> {s_off.detail}")
+
+# 13. bailian_token_plan: Console DataV2 envelope -> monthly percent + reset
+# countdown, and an expired session surfaces the relogin hint.
+_reset_ms = int((_time.time() + 12 * 86400 + 3600) * 1000)
+
+def _fake_bailian(api, data, token, region, site, switch_agent, timeout):
+    return {
+        "data": {
+            "success": True,
+            "DataV2": {
+                "ret": ["SUCCESS::ok"],
+                "data": {"data": {
+                    "hasQuotaData": True,
+                    "per1MonthPercentage": 0.2345,
+                    "per1MonthResetTime": _reset_ms,
+                }},
+            },
+        },
+    }
+
+_orig_bailian = _providers._bailian_console_call
+_providers._bailian_console_call = _fake_bailian
+try:
+    s_bail = fetch({
+        "type": "bailian_token_plan",
+        "access_token": "test-bailian-1234567890",
+        "bailian_config": str(HERE / "_missing_bailian.json"),
+    }, timeout=5)
+finally:
+    _providers._bailian_console_call = _orig_bailian
+_expect(s_bail.ok, f"bailian should be ok, got {s_bail.error!r}")
+_expect(s_bail.unit == "percent" and abs(s_bail.primary - 23.45) < 1e-6,
+        f"bailian 0.2345 should map to 23.45%, got {s_bail.primary!r}")
+_expect("month 23% used" in s_bail.detail,
+        f"bailian detail should show monthly usage, got {s_bail.detail!r}")
+_expect("resets in 12d" in s_bail.detail,
+        f"bailian detail should show reset countdown, got {s_bail.detail!r}")
+_expect(s_bail.windows and s_bail.windows[0]["label"] == "Monthly",
+        f"bailian should expose a Monthly window, got {s_bail.windows!r}")
+_expect(s_bail.windows[0]["primary"] is True,
+        "the monthly window should be primary")
+_expect(abs(s_bail.windows[0]["pct"] - 23.45) < 1e-6,
+        f"window pct should be 23.45, got {s_bail.windows[0]['pct']!r}")
+
+_providers._bailian_console_call = lambda *a, **k: {
+    "data": {"success": False, "errorCode": "NotLogined", "errorMsg": "not logged in"},
+}
+try:
+    s_bail_exp = fetch({
+        "type": "bailian_token_plan",
+        "access_token": "test-bailian-1234567890",
+        "bailian_config": str(HERE / "_missing_bailian.json"),
+    }, timeout=5)
+finally:
+    _providers._bailian_console_call = _orig_bailian
+_expect(not s_bail_exp.ok and "bl auth login --console" in (s_bail_exp.error or ""),
+        f"bailian expired session should hint relogin, got {s_bail_exp.error!r}")
+print(f"[13/17] bailian token plan OK -> {s_bail.detail!r}")
+
+# 14. bailian_token_plan AccessKey path: a minted token replaces the console
+# session, and a NotLogined reply forces one fresh mint and retry.
+_orig_mint = _providers._bailian_minted_token
+_mint_forces = []
+_seen_tokens = []
+
+def _fake_mint(ak, sk, region, security_token, timeout, force=False):
+    _mint_forces.append(force)
+    return "minted-token"
+
+def _fake_gateway_retry(api, data, token, region, site, switch_agent, timeout):
+    _seen_tokens.append(token)
+    if len(_seen_tokens) == 1:
+        return {"data": {"success": False, "errorCode": "NotLogined",
+                         "errorMsg": "not logged in"}}
+    return _fake_bailian(api, data, token, region, site, switch_agent, timeout)
+
+_providers._bailian_minted_token = _fake_mint
+_providers._bailian_console_call = _fake_gateway_retry
+try:
+    s_ak = fetch({
+        "type": "bailian_token_plan",
+        "access_key_id": "test-ak-1234567890",
+        "access_key_secret": "test-sk-1234567890",
+        "bailian_config": str(HERE / "_missing_bailian.json"),
+    }, timeout=5)
+finally:
+    _providers._bailian_minted_token = _orig_mint
+    _providers._bailian_console_call = _orig_bailian
+_expect(s_ak.ok, f"bailian AccessKey path should be ok, got {s_ak.error!r}")
+_expect(_seen_tokens == ["minted-token", "minted-token"],
+        f"both gateway calls should use the minted token, got {_seen_tokens!r}")
+_expect(_mint_forces == [False, True],
+        f"NotLogined should force one fresh mint, got {_mint_forces!r}")
+print(f"[14/17] bailian AccessKey refresh OK -> {s_ak.detail!r}")
+
+# 15. A mint failure without any console token must surface, not hide.
+def _fake_mint_fail(*args, **kwargs):
+    raise RuntimeError("Alibaba Cloud GenerateCLIAccessToken failed: InvalidAccessKeyId.NotFound")
+
+_providers._bailian_minted_token = _fake_mint_fail
+try:
+    s_ak_fail = fetch({
+        "type": "bailian_token_plan",
+        "access_key_id": "test-ak-1234567890",
+        "access_key_secret": "test-sk-1234567890",
+        "bailian_config": str(HERE / "_missing_bailian.json"),
+    }, timeout=5)
+finally:
+    _providers._bailian_minted_token = _orig_mint
+_expect(not s_ak_fail.ok and "InvalidAccessKeyId" in (s_ak_fail.error or ""),
+        f"bailian mint failure should surface, got {s_ak_fail.error!r}")
+print(f"[15/17] bailian mint failure OK -> {s_ak_fail.error!r}")
+
+# 16. The Bailian login menu item appears only with a Bailian provider,
+# and its CLI args carry the configured console site.
+_login_app = monitor.App.__new__(monitor.App)
+_login_app._last_reload_error = None
+_login_app._fail_state = {}
+_login_app.snapshots = []
+_login_app.provider_cfgs = []
+_menu_no = _login_app._build_menu()
+_expect(
+    all("Bailian login" not in (getattr(item, "text", "") or "")
+        for item in _menu_no.items),
+    "Bailian login should be absent without a Bailian provider",
+)
+_login_app.provider_cfgs = [{"type": "bailian_token_plan"}]
+_menu_yes = _login_app._build_menu()
+_expect(
+    any("Bailian login" in (getattr(item, "text", "") or "")
+        for item in _menu_yes.items),
+    "Bailian login should appear with a Bailian provider",
+)
+_expect(getattr(_menu_yes.items[0], "default", False) is True,
+        "Show usage should be the tray's default action")
+_expect(
+    monitor._bailian_login_args({"console_site": "international"})
+    == ["auth", "login", "--console", "--console-site", "international"],
+    "Bailian login args should carry the console site",
+)
+_expect(
+    monitor._bailian_login_args({}) == ["auth", "login", "--console"],
+    "Bailian login args should default to domestic",
+)
+print("[16/17] bailian login menu OK")
+
+# 17. Usage card helpers: colors, bar fill, reset text, generic value, URL.
+import ui as _ui
+
+_expect(_ui.status_color(10) == "#5eead4", "10% should be mint")
+_expect(_ui.status_color(70) == "#f59e0b", "70% should be amber")
+_expect(_ui.status_color(90) == "#ef4444", "90% should be red")
+_expect(_ui.bar_fill(0) == 0, "0% should fill no segments")
+_expect(_ui.bar_fill(50) == 20, "50% should fill half of 40 segments")
+_expect(_ui.bar_fill(100) == 40, "100% should fill all segments")
+_expect(_ui.reset_in(None) == "", "missing reset should render empty")
+_expect(_ui.generic_value(Snapshot(primary=12.34, unit="CNY", ok=True)) == "\u00a512.34",
+        "generic CNY value should use the yuan symbol")
+_expect(_ui.generic_value(Snapshot(primary=11.2, unit="percent", ok=True)) == "11%",
+        "generic percent should round to an integer")
+_expect(_ui.DEFAULT_DETAILS_URL.startswith("https://bailian.console.aliyun.com/"),
+        "details URL should point at the Bailian console")
+
+class _LinkApp:
+    def _bailian_cfg(self):
+        return {"details_url": "https://example.test/plan"}
+
+_link = _ui.UsageWindow.__new__(_ui.UsageWindow)
+_link.app = _LinkApp()
+_link._visible = False
+_link._window = None
+_opened = []
+_orig_open = _ui.webbrowser.open
+_ui.webbrowser.open = lambda url: _opened.append(url)
+try:
+    _link.open_details()
+finally:
+    _ui.webbrowser.open = _orig_open
+_expect(_opened == ["https://example.test/plan"],
+        f"View details should open the configured URL, got {_opened!r}")
+print("[17/17] ui helpers OK")
 
 print("ALL VERIFY CHECKS PASSED")

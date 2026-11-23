@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -22,6 +24,7 @@ from PIL import Image, ImageDraw, ImageFont
 from pystray import MenuItem as Item
 
 from providers import Snapshot, fetch, safe_err
+from ui import UsageWindow
 
 
 APP_DIR = Path(__file__).parent.resolve()
@@ -52,8 +55,41 @@ STATUS_COLORS = {
     "alert": "#ef4444",
     "unknown": "#6b7280",
 }
+
+_BAILIAN_TYPES = {"bailian", "bailian_token_plan"}
+
+
+def _bailian_login_args(cfg: dict[str, Any]) -> list[str]:
+    args = ["auth", "login", "--console"]
+    site = str(cfg.get("console_site") or "").lower()
+    if site in ("domestic", "international"):
+        args += ["--console-site", site]
+    return args
+
+
+def _run_bl(args: list[str], timeout: float = 960.0) -> subprocess.CompletedProcess:
+    """Run the Bailian CLI hidden and capture its output. The Windows npm
+    shim is a .cmd; CreateProcess needs cmd.exe to launch it."""
+    bl = shutil.which("bl.cmd") if os.name == "nt" else None
+    if not bl and os.name == "nt":
+        npm_shim = Path(os.environ.get("APPDATA", "")) / "npm" / "bl.cmd"
+        if npm_shim.exists():
+            bl = str(npm_shim)
+    bl = bl or shutil.which("bl")
+    if not bl:
+        raise RuntimeError("bl not found; run: npm i -g bailian-cli")
+    cmd = [bl, *args]
+    if os.name == "nt" and bl.lower().endswith((".cmd", ".bat")):
+        cmd = ["cmd", "/c", *cmd]
+    return subprocess.run(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
 CURRENCY_SYMBOLS = {"USD": "$", "CNY": "\u00a5", "EUR": "\u20ac", "GBP": "\u00a3", "JPY": "\u00a5"}
-STATUS_DOTS = {"ok": "\u25cf", "warn": "\u25cf", "alert": "\u25cf", "unknown": "\u25cb"}
 
 
 # ---------- config ----------
@@ -124,17 +160,6 @@ def _usage_fraction(snap: Snapshot) -> float | None:
     return None
 
 
-def format_primary(snap: Snapshot) -> str:
-    if not snap.ok:
-        return snap.error or "ERR"
-    if snap.primary is None:
-        return "-"
-    if snap.unit == "percent":
-        return f"{snap.primary:.0f}%"
-    if snap.unit in CURRENCY_SYMBOLS:
-        sym = CURRENCY_SYMBOLS[snap.unit]
-        return f"{sym}{snap.primary:,.2f}"
-    return f"{snap.primary:g}"
 
 
 def _try_font(size: int) -> ImageFont.ImageFont:
@@ -294,28 +319,6 @@ def _short(s: str, n: int) -> str:
     return s if len(s) <= n else s[: n - 1] + "\u2026"
 
 
-def _display_detail(value: str, detail: str) -> str:
-    detail = (detail or "").strip()
-    if not detail or detail == value:
-        return ""
-    return detail
-
-
-def _menu_label(name: str, snap: Snapshot) -> str:
-    if snap.paused:
-        # Failure-throttled: surface the pause counter and the last error.
-        head = f"paused ({snap.fail_count}/{snap.paused_total} fails)"
-        detail = snap.error or "fetch failed"
-        return _short(f"{name}: {head}  |  {detail}", 60)
-    value = format_primary(snap)
-    if snap.ok:
-        detail = _display_detail(value, snap.detail)
-        label = f"{name}: {value}"
-        if detail:
-            label += f"  |  {detail}"
-        return _short(label, 60)
-    detail = snap.error or "fetch failed"
-    return _short(f"{name}: {value}  |  {detail}", 60)
 
 
 # ---------- application ----------
@@ -329,12 +332,15 @@ class App:
         self.snapshots: list[tuple[str, Snapshot]] = []
         self._stop = threading.Event()
         self.icon: pystray.Icon | None = None
+        self.usage_window: UsageWindow | None = None
         self._refresh_lock = threading.Lock()
         self._last_reload_error: str | None = None
         self._last_refresh_at: float | None = None  # wall-clock seconds of last refresh
         # Per-provider failure-throttling state, keyed by display name.
         # Each entry: {"fail_count": int, "paused_remaining": int, "last_error": str}
         self._fail_state: dict[str, dict[str, Any]] = {}
+        self._bailian_login_running = False
+        self._bailian_login_error: str | None = None
         self.reload_config()
 
     def _apply_config(self, cfg: dict[str, Any]) -> None:
@@ -354,6 +360,7 @@ class App:
             self._last_reload_error = f"reload failed: {exc}"
             print(self._last_reload_error, file=sys.stderr)
             self._update_tray()
+            self._notify_ui()
             return
         self._last_reload_error = None
         self._apply_config(cfg)
@@ -363,7 +370,55 @@ class App:
         self.snapshots = []
         self._fail_state = {}
         self._update_tray()
+        self._notify_ui()
         self.refresh_async()
+
+    # ----- Bailian login -----
+    def _bailian_cfg(self) -> dict[str, Any] | None:
+        for cfg in getattr(self, "provider_cfgs", []):
+            if cfg.get("disabled"):
+                continue
+            if str(cfg.get("type") or "").lower() in _BAILIAN_TYPES:
+                return cfg
+        return None
+
+    def start_bailian_login(self) -> None:
+        if getattr(self, "_bailian_login_running", False):
+            return
+        cfg = self._bailian_cfg()
+        if cfg is None:
+            return
+        self._bailian_login_running = True
+        self._bailian_login_error = None
+        self._update_tray()
+        self._notify_ui()
+        threading.Thread(
+            target=self._bailian_login_worker, args=(cfg,), daemon=True,
+        ).start()
+
+    def _bailian_login_worker(self, cfg: dict[str, Any]) -> None:
+        try:
+            proc = _run_bl(_bailian_login_args(cfg))
+            if proc.returncode != 0:
+                lines = []
+                for line in (proc.stdout or "").splitlines() + (proc.stderr or "").splitlines():
+                    line = line.strip()
+                    if not line or "UNDICI-EHPA" in line or "trace-warnings" in line:
+                        continue
+                    lines.append(line)
+                errors = [line for line in lines if line.lower().startswith("error:")]
+                raise RuntimeError(
+                    errors[-1] if errors else (lines[-1] if lines else "login failed"),
+                )
+        except Exception as exc:
+            self._bailian_login_error = safe_err(exc)
+            self._bailian_login_running = False
+            self._update_tray()
+            self._notify_ui()
+            return
+        self._bailian_login_running = False
+        self._bailian_login_error = None
+        self.reload_config()
 
     # ----- refresh -----
     def refresh(self):
@@ -421,9 +476,20 @@ class App:
             self.snapshots = results
             self._last_refresh_at = time.time()
             self._update_tray()
+            self._notify_ui()
 
     def refresh_async(self):
         threading.Thread(target=self.refresh, daemon=True).start()
+
+    def _notify_ui(self):
+        ui = getattr(self, "usage_window", None)
+        if ui is not None:
+            ui.notify()
+
+    def show_usage(self):
+        ui = getattr(self, "usage_window", None)
+        if ui is not None:
+            ui.toggle()
 
     def _update_tray(self):
         if self.icon is None:
@@ -433,7 +499,7 @@ class App:
         except Exception:
             pass
         try:
-            self.icon.title = self._build_tooltip()
+            self.icon.title = "Token Monitor"
         except Exception:
             pass
         try:
@@ -442,11 +508,9 @@ class App:
             pass
 
     def _format_age(self) -> str:
-        """Render the time since the last successful refresh for the
-        tooltip footer. Returns 'never' before the first refresh.
-        `_last_refresh_at` is a wall-clock timestamp (seconds since
-        the epoch), so subtracting `time.time()` gives the same
-        elapsed-seconds value and reads naturally if you log it."""
+        """Render the time since the last refresh for the usage card.
+        Returns 'never' before the first refresh. `_last_refresh_at` is a
+        wall-clock timestamp (seconds since the epoch)."""
         ts = getattr(self, "_last_refresh_at", None)
         if ts is None:
             return "never"
@@ -461,48 +525,31 @@ class App:
             return f"{int(secs // 3600)}h ago"
         return f"{int(secs // 86400)}d ago"
 
-    def _build_tooltip(self) -> str:
-        # If a Reload config just failed, the per-provider data on
-        # disk is stale but we kept the previous in-memory state,
-        # so the only place to surface the failure is the tray
-        # tooltip itself.
-        if self._last_reload_error:
-            return f"Token Monitor\n{self._last_reload_error}"
-        visible = [(n, s) for n, s in self.snapshots if not s.hidden]
-        if not visible:
-            return "Token Monitor\n(no providers configured)"
-        lines = ["Token Monitor"]
-        for name, snap in visible:
-            dot = STATUS_DOTS[_status_of(snap)]
-            if snap.paused:
-                head = f"paused ({snap.fail_count}/{snap.paused_total} fails)"
-                err = _short(snap.error or "", 50)
-                lines.append(f"{dot} {name}: {head} ERR {err}")
-            elif snap.ok:
-                value = format_primary(snap)
-                detail = _display_detail(value, snap.detail)
-                if detail:
-                    lines.append(f"{dot} {name}: {value} | {_short(detail, 45)}")
-                else:
-                    lines.append(f"{dot} {name}: {value}")
-            else:
-                err = _short(snap.error or "", 50)
-                lines.append(f"{dot} {name}: ERR {err}")
-        lines.append(f"last update: {self._format_age()}")
-        return "\n".join(lines)
-
     def _build_menu(self) -> pystray.Menu:
-        items: list[Any] = []
-        visible = [(n, s) for n, s in self.snapshots if not s.hidden]
-        if not visible:
-            items.append(Item("(no providers configured)", None, enabled=False))
-        else:
-            for name, snap in visible:
-                items.append(Item(_menu_label(name, snap), None, enabled=False))
-        items.extend([
+        items: list[Any] = [
+            Item("Show usage", lambda icon, item: self.show_usage(), default=True),
             pystray.Menu.SEPARATOR,
             Item("Refresh now", lambda icon, item: self.refresh_async()),
             Item("Reload config", lambda icon, item: self.reload_config()),
+        ]
+        if self._bailian_cfg() is not None:
+            running = getattr(self, "_bailian_login_running", False)
+            error = getattr(self, "_bailian_login_error", None)
+            if running:
+                items.append(Item(
+                    "Bailian login: waiting for browser...", None, enabled=False,
+                ))
+            elif error:
+                items.append(Item(
+                    _short(f"Bailian login failed: {error}", 60),
+                    lambda icon, item: self.start_bailian_login(),
+                ))
+            else:
+                items.append(Item(
+                    "Bailian login (browser)",
+                    lambda icon, item: self.start_bailian_login(),
+                ))
+        items.extend([
             Item("Open config folder", lambda icon, item: self.open_config_dir()),
             pystray.Menu.SEPARATOR,
             Item("Quit", lambda icon, item: self.quit()),
@@ -532,38 +579,49 @@ class App:
             pass
 
     # ----- main loop -----
-    # Two independent timers:
-    #  - data refresh every `interval` seconds (default 5m);
-    #  - tooltip rebuild every TOOLTIP_TICK_S seconds (default 180s / 3min),
-    #    so the "last update: Xs ago" footer keeps moving even
-    #    between data refreshes. Without the tick, Windows caches
-    #    the tooltip title and the age string stays "0s ago" until
-    #    the next data fetch.
-    TOOLTIP_TICK_S = 180  # tooltip rebuild cadence; 3 min is enough
+    def _on_gui_ready(self):
+        self._start_tray()
+        threading.Thread(target=self._refresh_loop, daemon=True).start()
+        if os.environ.get("TOKENMONITOR_SHOW_CARD") == "1":
+            threading.Timer(1.5, self.show_usage).start()
+
+    def _refresh_loop(self):
+        next_refresh = time.monotonic() + self.interval
+        while not self._stop.wait(max(1.0, next_refresh - time.monotonic())):
+            self.refresh()
+            next_refresh = time.monotonic() + self.interval
 
     def run(self):
-        self.refresh()
-        self._start_tray()
+        self.usage_window = UsageWindow(self)
         try:
-            next_refresh = time.monotonic() + self.interval
-            while not self._stop.is_set():
-                tick = min(self.TOOLTIP_TICK_S,
-                           max(1.0, next_refresh - time.monotonic()))
-                if self._stop.wait(tick):
-                    break
-                # Always refresh the tooltip so "last update" ages.
-                self._update_tray()
-                if time.monotonic() >= next_refresh:
-                    self.refresh()
-                    next_refresh = time.monotonic() + self.interval
+            self.usage_window.start(self._on_gui_ready)
         except KeyboardInterrupt:
             pass
+        except Exception as exc:
+            message = f"usage window failed: {exc}"
+            print(message, file=sys.stderr)
+            try:
+                (_config_dir() / "ui-error.log").write_text(
+                    message + "\n", encoding="utf-8",
+                )
+            except Exception:
+                pass
+            if self.icon is None:
+                self._start_tray()
+                self.refresh()
+                try:
+                    self._refresh_loop()
+                except KeyboardInterrupt:
+                    pass
         finally:
             self._stop.set()
             self._shutdown()
 
     def quit(self):
         self._stop.set()
+        ui = getattr(self, "usage_window", None)
+        if ui is not None:
+            ui.destroy()
         self._shutdown()
 
     def open_config_dir(self):

@@ -1,2 +1,0 @@
-path = 'monitor.py'  
- 

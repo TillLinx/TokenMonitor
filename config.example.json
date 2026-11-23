@@ -17,6 +17,11 @@
       "alert_below": 1.0,
       "informational": false,
       "monthly_budget": 30
+    },
+    {
+      "name": "Bailian Token Plan",
+      "type": "bailian_token_plan",
+      "disabled": true
     }
   ]
 }
